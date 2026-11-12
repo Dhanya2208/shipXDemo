@@ -1,115 +1,84 @@
-const dotenv = require("dotenv");
-dotenv.config();
+require("dotenv").config();
+require("@shopify/shopify-api/adapters/node");
 
-require("isomorphic-fetch");
+const crypto = require("crypto");
 const Koa = require("koa");
 const next = require("next");
-const Router = require("koa-router");
-const { verifyRequest } = require("@shopify/koa-shopify-auth");
-const { default: createShopifyAuth } = require("@shopify/koa-shopify-auth");
-const { receiveWebhook } = require("@shopify/koa-shopify-webhooks");
-const { default: Shopify, ApiVersion } = require("@shopify/shopify-api");
+const Router = require("@koa/router");
+const { koaBody } = require("koa-body");
+const { shopifyApi, ApiVersion } = require("@shopify/shopify-api");
 
+const apiKey = process.env.SHOPIFY_API_KEY;
+const apiSecretKey = process.env.SHOPIFY_API_SECRET_KEY || process.env.SHOPIFY_API_SECRET;
+const host = process.env.HOST;
+const scopes = (process.env.SCOPES || "").split(",").map((scope) => scope.trim()).filter(Boolean);
+const hostName = host ? new URL(host).hostname : "localhost";
+const apiVersion = process.env.API_VERSION || ApiVersion.October26;
+process.env.API_VERSION = apiVersion;
+
+if (!apiKey || !apiSecretKey) throw new Error("SHOPIFY_API_KEY and SHOPIFY_API_SECRET_KEY must be set in .env.");
+if (!host) throw new Error("HOST must be set in .env to the public HTTPS app URL.");
+
+const shopify = shopifyApi({ apiKey, apiSecretKey, scopes, hostName, apiVersion, isEmbeddedApp: true });
 const routes = require("./server/routes");
-const config = require("./config");
-
-Shopify.Context.initialize({
-  API_KEY: process.env.SHOPIFY_API_KEY,
-  API_SECRET_KEY: process.env.SHOPIFY_API_SECRET,
-  SCOPES: process.env.SCOPES.split(","),
-  HOST_NAME: process.env.HOST.replace(/https:\/\//, ""),
-  API_VERSION: ApiVersion.April21,
-  IS_EMBEDDED_APP: true,
-  SESSION_STORAGE: getSessionStorage(),
-});
-
-const port = parseInt(process.env.PORT, 10) || 8081;
+const port = Number(process.env.PORT) || 3000;
 const dev = process.env.NODE_ENV !== "production";
-const app = next({
-  dev,
-});
+const app = next({ dev });
 const handle = app.getRequestHandler();
+const activeShops = new Map();
 
-const ACTIVE_SHOPIFY_SHOPS = {};
-
-app.prepare().then(async () => {
+app.prepare().then(() => {
   const server = new Koa();
   const router = new Router();
-  server.keys = [Shopify.Context.API_SECRET_KEY];
-  server.use(
-    createShopifyAuth({
-      accessMode: "offline",
-      async afterAuth(ctx) {
-        const { shop, accessToken } = ctx.state.shopify;
-        ACTIVE_SHOPIFY_SHOPS[shop] = accessToken; //Storing temporarily, access token will be stored to db on saveSetup
 
-        console.log("accessToken", accessToken);
-        //Webhook registration
-        await routes.registerShopifyWebhooks(accessToken, shop);
-
-        ctx.redirect(`/?shop=${shop}`);
-      },
-    })
-  );
-
-  const handleRequest = async (ctx) => {
-    await handle(ctx.req, ctx.res);
+  router.get("/auth", async (ctx) => {
+    const shop = shopify.utils.sanitizeShop(ctx.query.shop, true);
+    if (!shop) ctx.throw(400, "A valid shop parameter is required.");
+    await shopify.auth.begin({ shop, callbackPath: "/auth/callback", isOnline: false, rawRequest: ctx.req, rawResponse: ctx.res });
     ctx.respond = false;
-    ctx.res.statusCode = 200;
-  };
-
-  router.get("/", async (ctx) => {
-    const shop = ctx.query.shop;
-    // This shop hasn't been seen yet, go through OAuth to create a session
-    if (ACTIVE_SHOPIFY_SHOPS[shop] === undefined) {
-      ctx.redirect(`/auth?shop=${shop}`);
-    } else {
-      await handleRequest(ctx);
-    }
   });
 
-  router.post(
-    "/graphql",
-    verifyRequest({ returnHeader: true }),
-    async (ctx, next) => {
-      await Shopify.Utils.graphqlProxy(ctx.req, ctx.res);
-    }
-  );
+  router.get("/auth/callback", async (ctx) => {
+    const { session } = await shopify.auth.callback({ rawRequest: ctx.req, rawResponse: ctx.res });
+    activeShops.set(session.shop, session.accessToken);
+    await routes.registerShopifyWebhooks(session.accessToken, session.shop);
+    ctx.redirect(`/?shop=${encodeURIComponent(session.shop)}`);
+  });
 
-  const webhook = receiveWebhook({ secret: Shopify.Context.API_SECRET_KEY });
+  router.post("/graphql", routes.authenticateRequest(activeShops, apiKey, apiSecretKey), async (ctx) => {
+    const response = await fetch(`https://${ctx.state.shop}/admin/api/${apiVersion}/graphql.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": ctx.state.accessToken },
+      body: JSON.stringify(ctx.request.body || {}),
+    });
+    ctx.status = response.status;
+    ctx.body = await response.json();
+  });
 
+  server.use(async (ctx, nextMiddleware) => {
+    if (!ctx.path.startsWith("/webhooks/") || ctx.method !== "POST") return nextMiddleware();
+    const chunks = [];
+    for await (const chunk of ctx.req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
+    const received = Buffer.from(ctx.get("X-Shopify-Hmac-Sha256"));
+    const expected = Buffer.from(crypto.createHmac("sha256", apiSecretKey).update(rawBody).digest("base64"));
+    if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) ctx.throw(401, "Invalid webhook signature.");
+    try { ctx.state.webhook = JSON.parse(rawBody.toString("utf8")); }
+    catch { ctx.throw(400, "Invalid webhook JSON."); }
+    await nextMiddleware();
+  });
+
+  server.use(async (ctx, nextMiddleware) => {
+    if (ctx.path.startsWith("/webhooks/")) return nextMiddleware();
+    return koaBody({ json: true, urlencoded: true })(ctx, nextMiddleware);
+  });
   routes.getPublicAPIRoutes(router, handle);
-  routes.getAuthenticatedAPIRoutes(router, ACTIVE_SHOPIFY_SHOPS);
-  routes.registerAppWebhooks(router, webhook, ACTIVE_SHOPIFY_SHOPS);
-  routes.registerGdprWebhooks(router, webhook);
-
-  router.get("(/_next/static/.*)", handleRequest); // Static content is clear
-  router.get("/_next/webpack-hmr", handleRequest); // Webpack content is clear
-  router.get("(.*)", verifyRequest(), handleRequest); // Everything else must have sessions
-
-  // config.validateConfig();  // Comment to ignore config validations.
-
-  server.use(router.allowedMethods());
+  routes.getAuthenticatedAPIRoutes(router, activeShops, apiKey, apiSecretKey);
+  routes.registerAppWebhooks(router, activeShops);
+  routes.registerGdprWebhooks(router);
   server.use(router.routes());
-  server.listen(port, () => {
-    console.log(`> Ready on http://localhost:${port}`);
-    console.log(`> HOST -> ${process.env.HOST}`);
-  });
-});
+  server.use(router.allowedMethods());
+  server.use(async (ctx) => { await handle(ctx.req, ctx.res); ctx.respond = false; });
+  server.listen(port, () => console.log(`> Ready on http://localhost:${port} (Shopify host: ${host})`));
+}).catch((error) => { console.error("Failed to start app:", error); process.exit(1); });
 
-function getSessionStorage() {
-  let redisStore;
-  let sessionStorage;
-  if (
-    process.env.REDISCACHE_ENABLED === "true" &&
-    config.CACHE.REDISCACHE_ENDPOINT
-  ) {
-    redisStore = require("./server/cache/redis-store");
-    sessionStorage = new Shopify.Session.CustomSessionStorage(
-      redisStore.storeCallback,
-      redisStore.loadCallback,
-      redisStore.deleteCallback
-    );
-  } else sessionStorage = new Shopify.Session.MemorySessionStorage();
-  return sessionStorage;
-}

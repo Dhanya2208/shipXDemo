@@ -1,34 +1,24 @@
-
 const jwt = require("jsonwebtoken");
 
-module.exports = {
-  getShopAccessToken: async function (shop, ctx, ACTIVE_SHOPIFY_SHOPS) {
-    let accessToken = ACTIVE_SHOPIFY_SHOPS[shop];
-    // Implement cache here
-    // if (!accessToken) {
-    //   accessToken = await getAccessToken(shop, cache);
-    // }
-    if (!accessToken) {
-      ctx.redirect(`/auth?shop=${shop}`);
-      return;
-    }
-    else {
-      return accessToken;
-    }
-  },
-
-  getShop: function (ctx) {
-    const bearer = ctx.request && ctx.request.header ? ctx.request.header.authorization : undefined;
-    if (bearer) {
-      const token = bearer.split(" ")[1];
-      if (token) {
-        const decoded = jwt.decode(token);
-        if (decoded && decoded.dest) {
-          const shop = new URL(decoded.dest).host;
-          return shop;
-        }
-      }
-    }
-    return undefined;
-  }
+function validShopFromDestination(destination) {
+  if (typeof destination !== "string") return undefined;
+  try {
+    const hostname = new URL(destination).hostname.toLowerCase();
+    return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(hostname) ? hostname : undefined;
+  } catch { return undefined; }
 }
+
+module.exports = {
+  validShopFromDestination,
+  getShopAccessToken: async function (shop, ctx, activeShops) {
+    const accessToken = activeShops.get(shop);
+    if (!accessToken) { ctx.status = 401; return undefined; }
+    return accessToken;
+  },
+  getShop: function (ctx) {
+    const authorization = ctx.get("Authorization");
+    if (!authorization.startsWith("Bearer ")) return undefined;
+    const token = jwt.decode(authorization.slice(7));
+    return validShopFromDestination(token?.dest);
+  },
+};

@@ -14,7 +14,7 @@ const saveGdprWebhookRequest = async (webhook, requestType) => {
     ReturnValues: 'NONE'
   };
   try {
-    await db.put(saveWebhookRequestParams).promise();
+    await db.put(saveWebhookRequestParams);
     console.log('Succeffully saved Webhook request in DDB.');
     return true;
   } catch (error) {

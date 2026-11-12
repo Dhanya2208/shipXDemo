@@ -1,10 +1,9 @@
-require("isomorphic-fetch");
 
 const config = require("../../config");
 const graphQL = require("../utils/graphQL");
 const addSnippetUtil = require("../utils/addSnippetUtil");
 
-const { API_VERSION } = process.env;
+const API_VERSION = process.env.API_VERSION || "2026-10";
 
 let _setup = (module.exports = {
   getSetup: async function (shop, accessToken) {
@@ -122,3 +121,7 @@ let _setup = (module.exports = {
     }
   },
 });
+
+
+
+

@@ -1,7 +1,6 @@
 var path = require('path');
 const fs = require('fs');
-require('isomorphic-fetch');
-const { API_VERSION } = process.env;
+const API_VERSION = process.env.API_VERSION || "2026-10";
 
 const config = require('../../config');
 
@@ -113,3 +112,6 @@ let _addSnippetUtil = module.exports = {
   }
 
 }
+
+
+

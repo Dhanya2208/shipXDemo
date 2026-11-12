@@ -1,48 +1,20 @@
-import React, { useState, useEffect } from 'react';
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { authenticatedFetch } from "@shopify/app-bridge-utils";
-import { Frame, Loading,  Card, EmptyState } from '@shopify/polaris';
+import React, { useEffect, useState } from "react";
 
-const Index = () => {
-  const app = useAppBridge();
-
-  const [isFetchingSetup, setIsFetchingSetup] = useState(true);
-  const [setup, setSetup] = useState({});
-
-  const getSetup = async () => {
-    authenticatedFetch(app)(`${HOST}/api/setup`, { method: 'GET' })
-      .then(response => response.json())
-      .then(setup => {
-        console.log("getSetup => setup", setup);
-        setSetup(setup);
-        setIsFetchingSetup(false);
-        console.log(setup);
-      }).catch(error => console.log('Error while fetching setup', error));
-  }
-
+export default function Index() {
+  const [state, setState] = useState({ loading: true, data: null, error: "" });
   useEffect(() => {
-    if (isFetchingSetup) {
-      getSetup();
-    }
-  }, [isFetchingSetup]);
-
-  if (isFetchingSetup) {
-    return (
-      <div style={{ height: '100px' }}>
-        <Frame>
-          <Loading />
-        </Frame>
-      </div>)
-  }
-  return (
-    <Card sectioned>
-      <EmptyState
-        heading={`Shop - ${setup.shop.name}`}
-        image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png">
-        <p>{`Contact - ${setup.shop.contactEmail}`}</p>
-      </EmptyState>
-    </Card>
-  )
+    let active = true;
+    fetch("/api/setup")
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Shopify request failed (${response.status})`);
+        return response.json();
+      })
+      .then((data) => { if (active) setState({ loading: false, data, error: "" }); })
+      .catch((error) => { if (active) setState({ loading: false, data: null, error: error.message }); });
+    return () => { active = false; };
+  }, []);
+  if (state.loading) return <main style={{ padding: 32 }}>Loading your Shopify store…</main>;
+  if (state.error) return <main style={{ padding: 32 }}><h1>Could not load the store</h1><p>{state.error}</p><p>Open this app from Shopify admin and confirm the app URL and credentials.</p></main>;
+  const shop = state.data?.shop;
+  return <main style={{ padding: 32, fontFamily: "Arial, sans-serif" }}><h1>Shop — {shop?.name || shop?.myshopifyDomain || "Shopify store"}</h1><p>Contact — {shop?.contactEmail || shop?.email || "Not provided"}</p></main>;
 }
-
-export default Index;

@@ -1,51 +1,16 @@
-const memcache = require('./memcache');
-const LRU = require('lru-cache');
-var simpleCache = new LRU(100);
-
+const cache = new Map();
+const memcache = require("./memcache");
 module.exports = {
-  get: (key) => {
-    return new Promise((resolve, reject) => {
-      let isMemcacheEnabled = (process.env.MEMCACHE_ENABLED && process.env.MEMCACHE_ENABLED === 'true') ? true : false;
-      if (isMemcacheEnabled) {
-        memcache.getItem(key).then(data => {
-          resolve(data ? JSON.parse(data) : undefined);
-        },
-          error => {
-            resolve(undefined);
-          });
-      } else {
-        let data = simpleCache.get(key);
-        resolve(data ? JSON.parse(data) : undefined);
-      }
-    });
+  async get(key) {
+    if (process.env.MEMCACHE_ENABLED === "true") { try { return await memcache.getItem(key); } catch { return undefined; } }
+    return cache.get(key);
   },
-  set: (key, value) => {
-    return new Promise((resolve, reject) => {
-      let isMemcacheEnabled = (process.env.MEMCACHE_ENABLED && process.env.MEMCACHE_ENABLED === 'true') ? true : false;
-      if (isMemcacheEnabled) {
-        memcache.setItem(key, JSON.stringify(value)).then(response => {
-          resolve(true);
-        },
-          error => {
-            resolve(false);
-          });
-      } else {
-        resolve(simpleCache.set(key, JSON.stringify(value)));
-      }
-    });
+  async set(key, value) {
+    if (process.env.MEMCACHE_ENABLED === "true") { try { await memcache.setItem(key, value); return true; } catch { return false; } }
+    cache.set(key, value); return true;
   },
-  delete: (key) => {
-    return new Promise((resolve, reject) => {
-      let isMemcacheEnabled = (process.env.MEMCACHE_ENABLED && process.env.MEMCACHE_ENABLED === 'true') ? true : false;
-      if (isMemcacheEnabled) {
-        memcache.deleteItem(key).then(response => {
-          resolve(true);
-        },
-          error => {
-            resolve(false);
-          })
-      } else
-        resolve(simpleCache.del(key));
-    });
-  }
-}
+  async delete(key) {
+    if (process.env.MEMCACHE_ENABLED === "true") { try { await memcache.deleteItem(key); return true; } catch { return false; } }
+    return cache.delete(key);
+  },
+};
